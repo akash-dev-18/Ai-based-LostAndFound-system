@@ -1,0 +1,115 @@
+name: lostfound-stack
+
+x-api-environment: &api-environment
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  DEBUG: ${DEBUG:-false}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-lostfound}:${POSTGRES_PASSWORD:-lostfound}@postgres:5432/${POSTGRES_DB:-lostfound}
+  REDIS_URL: redis://redis:6379/0
+  REDIS_CACHE_URL: redis://redis:6379/1
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+  CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:8080","http://127.0.0.1:8080"]}'
+  STORAGE_DIR: /app/storage
+  AI_TASKS_ENABLED: ${AI_TASKS_ENABLED:-true}
+  AI_DEVICE: ${AI_DEVICE:-cpu}
+  AI_LLM_BASE_URL: ${AI_LLM_BASE_URL:-}
+  AI_LLM_API_KEY: ${AI_LLM_API_KEY:-}
+  AI_LLM_MODEL: ${AI_LLM_MODEL:-}
+  HF_HOME: /models/huggingface
+  SENTENCE_TRANSFORMERS_HOME: /models/sentence-transformers
+  TORCH_HOME: /models/torch
+  TOKENIZERS_PARALLELISM: "false"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lostfound}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lostfound}
+      POSTGRES_DB: ${POSTGRES_DB:-lostfound}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./server/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-lostfound} -d ${POSTGRES_DB:-lostfound}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./server
+    image: lostfound-api:local
+    environment:
+      <<: *api-environment
+      RUN_MIGRATIONS: "true"
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-false}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - storage_data:/app/storage
+      - model_cache:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: lostfound-api:local
+    environment:
+      <<: *api-environment
+      RUN_MIGRATIONS: "false"
+      SEED_DEMO_DATA: "false"
+    command:
+      [
+        "celery",
+        "-A",
+        "app.worker.celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--concurrency=${CELERY_CONCURRENCY:-1}",
+      ]
+    volumes:
+      - storage_data:/app/storage
+      - model_cache:/models
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+
+  web:
+    build:
+      context: ./client
+      args:
+        VITE_API_BASE_URL: /api/v1
+    image: lostfound-web:local
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  storage_data:
+  model_cache:
